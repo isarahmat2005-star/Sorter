@@ -80,6 +80,8 @@
         .btn-browse:active:not(:disabled) { transform: translateY(2px); box-shadow: 0 2px 0 rgba(0,0,0,0.2); }
         .input-field { width: 100%; background: var(--input-bg); border: 2px solid var(--border); padding: 8px 12px; color: var(--text); font-family: 'Share Tech', sans-serif; box-sizing: border-box; font-size: 14px; height: 40px; transition: all 0.3s ease; outline: none; }
         .input-field:focus { border-color: var(--primary); box-shadow: 0 0 8px var(--grid-color); }
+        
+        .criteria-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
 
         /* ACTION BUTTONS */
         .action-bars { display: flex; gap: 10px; margin-bottom: 15px; margin-top: 10px; }
@@ -115,6 +117,11 @@
                 </div>
 
                 <div class="nav-actions">
+                    <!-- Tombol Support Lynk.id (Selalu Aktif) -->
+                    <a href="https://lynk.id/isaproject/0581ez0729vx" target="_blank" class="btn-nav-icon" style="background: #6f4e37;" title="Support Me">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M18 8h1a4 4 0 0 1 0 8h-1"></path><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"></path><line x1="6" y1="1" x2="6" y2="4"></line><line x1="10" y1="1" x2="10" y2="4"></line><line x1="14" y1="1" x2="14" y2="4"></line></svg>
+                    </a>
+
                     <div style="position: relative;">
                         <button class="btn-nav-icon lock-target" onclick="toggleThemeMenu()">
                             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"></circle><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"></circle><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"></circle><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"></circle><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.92 0 1.5-.58 1.5-1.5 0-.43-.17-.83-.44-1.14-.24-.28-.39-.65-.39-1.05 0-.85.68-1.55 1.53-1.55H16c3.31 0 6-2.69 6-6 0-4.97-4.48-9-10-9z"></path></svg>
@@ -147,9 +154,13 @@
                 </div>
             </div>
 
-            <div class="input-group" style="width: 50%;">
-                <label>Pindah Jika Ukuran di Bawah (MB)</label>
-                <input type="number" id="maxSize" class="input-field lock-target" placeholder="Cth: 5" oninput="validateReady()">
+            <div class="input-group">
+                <label>Kriteria Sortir File (Pilih Minimal 1)</label>
+                <div class="criteria-grid">
+                    <input type="number" id="minMb" class="input-field lock-target" placeholder="Min MB (Cth: 5)" oninput="validateReady()">
+                    <input type="text" id="minPx" class="input-field lock-target" placeholder="Min Px (Cth: 1920x1080)" oninput="validateReady()">
+                    <input type="text" id="formatExt" class="input-field lock-target" placeholder="Format (Cth: .jpg)" oninput="validateReady()">
+                </div>
             </div>
 
             <div class="action-bars">
@@ -165,7 +176,7 @@
                     <button onclick="clearLogs()" class="btn-mode lock-target">CLEAR LOGS</button>
                 </div>
             </div>
-            <div id="logPanel" class="log-panel"><div class="log-entry">System ready... Pilih folder untuk memulai.</div></div>
+            <div id="logPanel" class="log-panel"><div class="log-entry">System ready... Pilih folder dan kriteria untuk memulai.</div></div>
         </div>
     </div>
 
@@ -202,15 +213,20 @@
     // Validasi Tombol Start
     function validateReady() {
         const btn = document.getElementById('btnStart');
-        const maxSize = document.getElementById('maxSize').value;
-        if (sourceDirHandle && destDirHandle && maxSize && !isProcessing) {
+        const minMb = document.getElementById('minMb').value;
+        const minPx = document.getElementById('minPx').value;
+        const formatExt = document.getElementById('formatExt').value;
+        
+        const isCriteriaFilled = (minMb !== "") || (minPx !== "") || (formatExt !== "");
+
+        if (sourceDirHandle && destDirHandle && isCriteriaFilled && !isProcessing) {
             btn.disabled = false;
         } else {
             btn.disabled = true;
         }
     }
 
-    // Memilih Folder Sumber (Minta izin Read/Write agar bisa Hapus file)
+    // Memilih Folder Sumber
     async function selectSourceFolder() {
         try {
             sourceDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
@@ -230,9 +246,32 @@
         } catch (e) { addLog("Destination folder selection cancelled."); }
     }
 
+    // Fungsi Bantuan: Cek Resolusi Gambar (Px)
+    function getImageDimensions(file) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => { URL.revokeObjectURL(img.src); resolve({ width: img.width, height: img.height }); };
+            img.onerror = () => { URL.revokeObjectURL(img.src); resolve({ width: 0, height: 0 }); };
+            img.src = URL.createObjectURL(file);
+        });
+    }
+
     // Proses Eksekusi Pindah File
     async function startProcess() {
-        const maxSize = parseFloat(document.getElementById('maxSize').value);
+        // Ambil Data Input Kriteria
+        const minMb = parseFloat(document.getElementById('minMb').value);
+        
+        const minPxStr = document.getElementById('minPx').value.trim().toLowerCase();
+        let targetW = 0, targetH = 0;
+        if (minPxStr.includes('x')) {
+            const parts = minPxStr.split('x');
+            targetW = parseInt(parts[0]);
+            targetH = parseInt(parts[1]);
+        }
+        
+        let formatExt = document.getElementById('formatExt').value.trim().toLowerCase();
+        if (formatExt !== "" && !formatExt.startsWith('.')) formatExt = '.' + formatExt;
+
         isStopped = false; isPaused = false;
         
         setLockUI(true);
@@ -241,7 +280,11 @@
         document.getElementById('btnStart').disabled = true;
 
         addLog("--- QC SCANNING STARTED ---");
-        addLog(`Criteria: Size < ${maxSize} MB`);
+        let criteriaMsg = [];
+        if(!isNaN(minMb)) criteriaMsg.push(`Size < ${minMb} MB`);
+        if(targetW > 0) criteriaMsg.push(`Res < ${targetW}x${targetH} px`);
+        if(formatExt) criteriaMsg.push(`Format != ${formatExt}`);
+        addLog(`Criteria (OR): ${criteriaMsg.join(" | ")}`);
 
         let movedCount = 0;
 
@@ -252,9 +295,40 @@
 
                 if (entry.kind === 'file') {
                     const file = await entry.getFile();
-                    const sizeMB = file.size / (1024 * 1024);
+                    
+                    let shouldMove = false;
+                    let reason = "";
 
-                    if (sizeMB < maxSize) {
+                    const sizeMB = file.size / (1024 * 1024);
+                    const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+
+                    // Kriteria 1: Ukuran MB (Jika ukuran lebih kecil)
+                    if (!isNaN(minMb) && minMb > 0 && sizeMB < minMb) {
+                        shouldMove = true;
+                        reason = `Size (${sizeMB.toFixed(2)} MB < ${minMb} MB)`;
+                    }
+
+                    // Kriteria 2: Format (Jika BUKAN format ini)
+                    if (!shouldMove && formatExt !== "") {
+                        if (fileExt !== formatExt) {
+                            shouldMove = true;
+                            reason = `Format (${fileExt} != ${formatExt})`;
+                        }
+                    }
+
+                    // Kriteria 3: Resolusi Px (Jika Lebar ATAU Tinggi lebih kecil)
+                    if (!shouldMove && targetW > 0 && targetH > 0 && file.type.startsWith('image/')) {
+                        const dims = await getImageDimensions(file);
+                        if (dims.width > 0 && dims.height > 0) {
+                            if (dims.width < targetW || dims.height < targetH) {
+                                shouldMove = true;
+                                reason = `Res (${dims.width}x${dims.height} < ${targetW}x${targetH})`;
+                            }
+                        }
+                    }
+
+                    // Eksekusi Pindah File Jika Masuk Kriteria
+                    if (shouldMove) {
                         try {
                             // 1. Salin ke tujuan
                             const newFileHandle = await destDirHandle.getFileHandle(file.name, { create: true });
@@ -267,7 +341,7 @@
                             await sourceDirHandle.removeEntry(file.name);
                             
                             movedCount++;
-                            addLog(`Moved: ${file.name} (${sizeMB.toFixed(2)} MB)`);
+                            addLog(`Sorted: ${file.name} [${reason}]`);
                         } catch (err) {
                             addLog(`Error moving ${file.name}: ${err.message}`);
                         }
@@ -278,7 +352,7 @@
             addLog(`Error scanning folder: ${error.message}`);
         }
 
-        if (!isStopped) addLog(`--- PROCESS COMPLETE --- Total files moved: ${movedCount}`);
+        if (!isStopped) addLog(`--- PROCESS COMPLETE --- Total sorted files: ${movedCount}`);
         
         setLockUI(false);
         document.getElementById('btnPause').disabled = true;

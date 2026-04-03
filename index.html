@@ -256,7 +256,7 @@
         });
     }
 
-    // Proses Eksekusi Pindah File
+    // Proses Eksekusi Pindah File (Revisi: Tampung Dulu, Hapus Nanti)
     async function startProcess() {
         // Ambil Data Input Kriteria
         const minMb = parseFloat(document.getElementById('minMb').value);
@@ -287,8 +287,11 @@
         addLog(`Criteria (OR): ${criteriaMsg.join(" | ")}`);
 
         let movedCount = 0;
+        // Array untuk menampung daftar nama file yang harus dihapus nanti
+        let filesToDelete = [];
 
         try {
+            // TAHAP 1: SCANNING & COPY
             for await (const entry of sourceDirHandle.values()) {
                 if (isStopped) break;
                 while (isPaused) await new Promise(r => setTimeout(r, 500));
@@ -302,13 +305,13 @@
                     const sizeMB = file.size / (1024 * 1024);
                     const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
 
-                    // Kriteria 1: Ukuran MB (Jika ukuran lebih kecil)
+                    // Kriteria 1: Ukuran MB
                     if (!isNaN(minMb) && minMb > 0 && sizeMB < minMb) {
                         shouldMove = true;
                         reason = `Size (${sizeMB.toFixed(2)} MB < ${minMb} MB)`;
                     }
 
-                    // Kriteria 2: Format (Jika BUKAN format ini)
+                    // Kriteria 2: Format
                     if (!shouldMove && formatExt !== "") {
                         if (fileExt !== formatExt) {
                             shouldMove = true;
@@ -316,7 +319,7 @@
                         }
                     }
 
-                    // Kriteria 3: Resolusi Px (Jika Lebar ATAU Tinggi lebih kecil)
+                    // Kriteria 3: Resolusi Px
                     if (!shouldMove && targetW > 0 && targetH > 0 && file.type.startsWith('image/')) {
                         const dims = await getImageDimensions(file);
                         if (dims.width > 0 && dims.height > 0) {
@@ -330,24 +333,39 @@
                     // Eksekusi Pindah File Jika Masuk Kriteria
                     if (shouldMove) {
                         try {
-                            // 1. Salin ke tujuan
+                            // 1. Salin ke tujuan saja
                             const newFileHandle = await destDirHandle.getFileHandle(file.name, { create: true });
                             const writable = await newFileHandle.createWritable();
                             const fileData = await file.arrayBuffer();
                             await writable.write(fileData);
                             await writable.close();
 
-                            // 2. Hapus dari sumber
-                            await sourceDirHandle.removeEntry(file.name);
+                            // 2. Catat nama file untuk dihapus nanti
+                            filesToDelete.push(file.name);
                             
                             movedCount++;
-                            addLog(`Sorted: ${file.name} [${reason}]`);
+                            addLog(`Copied: ${file.name} [${reason}]`);
                         } catch (err) {
-                            addLog(`Error moving ${file.name}: ${err.message}`);
+                            addLog(`Error copying ${file.name}: ${err.message}`);
                         }
                     }
                 }
             }
+
+            // TAHAP 2: BATCH DELETE (Hapus file asli setelah semua selesai di-scan)
+            if (!isStopped && filesToDelete.length > 0) {
+                addLog("--- CLEANING UP SOURCE FOLDER ---");
+                for (const fileName of filesToDelete) {
+                    try {
+                        await sourceDirHandle.removeEntry(fileName);
+                        // Optional: Beri komentar log jika ingin melihat proses hapus
+                        // addLog(`Deleted original: ${fileName}`);
+                    } catch (err) {
+                        addLog(`Failed to delete original ${fileName}: ${err.message}`);
+                    }
+                }
+            }
+
         } catch (error) {
             addLog(`Error scanning folder: ${error.message}`);
         }

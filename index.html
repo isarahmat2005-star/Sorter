@@ -117,7 +117,6 @@
                 </div>
 
                 <div class="nav-actions">
-                    <!-- Tombol Support Lynk.id (Selalu Aktif) -->
                     <a href="https://lynk.id/isaproject/0581ez0729vx" target="_blank" class="btn-nav-icon" style="background: #6f4e37;" title="Support Me">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M18 8h1a4 4 0 0 1 0 8h-1"></path><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"></path><line x1="6" y1="1" x2="6" y2="4"></line><line x1="10" y1="1" x2="10" y2="4"></line><line x1="14" y1="1" x2="14" y2="4"></line></svg>
                     </a>
@@ -181,7 +180,6 @@
     </div>
 
 <script>
-    
     // --- PENGATURAN TEMA & JAM ---
     function toggleThemeMenu() { const m = document.getElementById('themeMenu'); m.style.display = m.style.display === 'flex' ? 'none' : 'flex'; }
     function setTheme(t) { document.body.className = t; document.getElementById('themeMenu').style.display = 'none'; localStorage.setItem('qcsorter_theme', t); addLog(`Theme set: ${t.toUpperCase()}`); }
@@ -247,7 +245,7 @@
         } catch (e) { addLog("Destination folder selection cancelled."); }
     }
 
-    // Fungsi Cek Px
+    // Fungsi Bantuan: Cek Resolusi Gambar (Px)
     function getImageDimensions(file) {
         return new Promise((resolve) => {
             const img = new Image();
@@ -258,7 +256,7 @@
         });
     }
 
-    // PROSES UTAMA (TRIK MENGAKALI BROWSER)
+    // PROSES UTAMA: OPSI 1 (BATCH DELETE / TAMPUNG DULU HAPUS NANTI)
     async function startProcess() {
         const minMb = parseFloat(document.getElementById('minMb').value);
         const minPxStr = document.getElementById('minPx').value.trim().toLowerCase();
@@ -273,6 +271,7 @@
         if (formatExt !== "" && !formatExt.startsWith('.')) formatExt = '.' + formatExt;
 
         isStopped = false; isPaused = false;
+        
         setLockUI(true);
         document.getElementById('btnPause').disabled = false;
         document.getElementById('btnStop').disabled = false;
@@ -284,88 +283,98 @@
         if(targetW > 0) criteriaMsg.push(`Res < ${targetW}x${targetH} px`);
         if(formatExt) criteriaMsg.push(`Format != ${formatExt}`);
         addLog(`Criteria (OR): ${criteriaMsg.join(" | ")}`);
-        
+
         let movedCount = 0;
-        const allFiles = []; // Buku catatan untuk trik absen cepat
+        let filesToDelete = []; // Buku catatan untuk file yang akan dihapus nanti
 
         try {
-            // TAHAP 1: ABSEN CEPAT (Baca folder secepat mungkin, lalu lupakan foldernya)
-            addLog("Membaca daftar file...");
+            // ==========================================
+            // TAHAP 1: SCANNING DAN MENGKOPI FILE (TANPA MENGHAPUS)
+            // ==========================================
+            addLog("Scanning folder...");
             for await (const entry of sourceDirHandle.values()) {
-                if (entry.kind === 'file') {
-                    // Kita ambil file aslinya sekarang juga sebelum statusnya berubah
-                    const file = await entry.getFile();
-                    allFiles.push({ handle: entry, data: file });
-                }
-            }
-            addLog(`Ditemukan ${allFiles.length} file. Mulai mengecek kriteria...`);
-
-            // TAHAP 2: CEK & EKSEKUSI (Bisa dilakukan dengan santai)
-            for (let i = 0; i < allFiles.length; i++) {
                 if (isStopped) break;
                 while (isPaused) await new Promise(r => setTimeout(r, 500));
 
-                const item = allFiles[i];
-                const file = item.data;
-                const fileHandle = item.handle;
-                
-                let shouldMove = false;
-                let reason = "";
+                if (entry.kind === 'file') {
+                    const file = await entry.getFile();
+                    
+                    let shouldMove = false;
+                    let reason = "";
 
-                const sizeMB = file.size / (1024 * 1024);
-                // Ekstraksi ekstensi yang lebih aman
-                const fileExt = file.name.includes('.') ? '.' + file.name.split('.').pop().toLowerCase() : '';
+                    const sizeMB = file.size / (1024 * 1024);
+                    // Cara aman mengambil ekstensi
+                    const fileExt = file.name.includes('.') ? '.' + file.name.split('.').pop().toLowerCase() : '';
 
-                // Kriteria 1: Ukuran MB
-                if (!isNaN(minMb) && minMb > 0 && sizeMB < minMb) {
-                    shouldMove = true;
-                    reason = `Size (${sizeMB.toFixed(2)} MB < ${minMb} MB)`;
-                }
-
-                // Kriteria 2: Format
-                if (!shouldMove && formatExt !== "") {
-                    if (fileExt !== formatExt) {
+                    // Kriteria 1: Ukuran MB
+                    if (!isNaN(minMb) && minMb > 0 && sizeMB < minMb) {
                         shouldMove = true;
-                        reason = `Format (${fileExt} bukan ${formatExt})`;
+                        reason = `Size (${sizeMB.toFixed(2)} MB < ${minMb} MB)`;
                     }
-                }
 
-                // Kriteria 3: Resolusi Px
-                if (!shouldMove && targetW > 0 && targetH > 0 && file.type.startsWith('image/')) {
-                    const dims = await getImageDimensions(file);
-                    if (dims.width > 0 && dims.height > 0) {
-                        if (dims.width < targetW || dims.height < targetH) {
+                    // Kriteria 2: Format
+                    if (!shouldMove && formatExt !== "") {
+                        if (fileExt !== formatExt) {
                             shouldMove = true;
-                            reason = `Res (${dims.width}x${dims.height} < ${targetW}x${targetH})`;
+                            reason = `Format (${fileExt} != ${formatExt})`;
+                        }
+                    }
+
+                    // Kriteria 3: Resolusi Px
+                    if (!shouldMove && targetW > 0 && targetH > 0 && file.type.startsWith('image/')) {
+                        const dims = await getImageDimensions(file);
+                        if (dims.width > 0 && dims.height > 0) {
+                            if (dims.width < targetW || dims.height < targetH) {
+                                shouldMove = true;
+                                reason = `Res (${dims.width}x${dims.height} < ${targetW}x${targetH})`;
+                            }
+                        }
+                    }
+
+                    // Eksekusi: Hanya Salin dan Catat Namanya
+                    if (shouldMove) {
+                        try {
+                            const newFileHandle = await destDirHandle.getFileHandle(file.name, { create: true });
+                            const writable = await newFileHandle.createWritable();
+                            const fileData = await file.arrayBuffer();
+                            await writable.write(fileData);
+                            await writable.close();
+
+                            filesToDelete.push(file.name); // Simpan nama file di buku catatan
+                            movedCount++;
+                            addLog(`Copied: ${file.name} [${reason}]`);
+                        } catch (err) {
+                            addLog(`Error copying ${file.name}: ${err.message}`);
                         }
                     }
                 }
+            }
 
-                // Eksekusi Pindah
-                if (shouldMove) {
+            // ==========================================
+            // TAHAP 2: HAPUS MASSAL (BATCH DELETE)
+            // ==========================================
+            if (!isStopped && filesToDelete.length > 0) {
+                addLog("--- CLEANING UP SOURCE FOLDER ---");
+                // Kita beri jeda sedikit agar browser "bernapas" dan menutup iterator folder
+                await new Promise(r => setTimeout(r, 1000));
+                
+                for (let i = 0; i < filesToDelete.length; i++) {
+                    if (isStopped) break;
+                    const fileName = filesToDelete[i];
                     try {
-                        // 1. Salin ke Destinasi
-                        const newFileHandle = await destDirHandle.getFileHandle(file.name, { create: true });
-                        const writable = await newFileHandle.createWritable();
-                        await writable.write(file); // Langsung tulis dari memory
-                        await writable.close();
-
-                        // 2. Hapus dari Sumber
-                        await sourceDirHandle.removeEntry(file.name);
-                        
-                        movedCount++;
-                        addLog(`=> Disortir: ${file.name} [${reason}]`);
+                        await sourceDirHandle.removeEntry(fileName);
+                        // addLog(`Deleted: ${fileName}`); // Buka komentar ini jika log ingin lebih cerewet
                     } catch (err) {
-                        addLog(`Error memindah ${file.name}: ${err.message}`);
+                        addLog(`Failed to delete ${fileName}: ${err.message}`);
                     }
                 }
             }
 
         } catch (error) {
-            addLog(`Error sistem: ${error.message}`);
+            addLog(`System Error: ${error.message}`);
         }
 
-        if (!isStopped) addLog(`--- SELESAI --- Total disortir: ${movedCount} file.`);
+        if (!isStopped) addLog(`--- PROCESS COMPLETE --- Total sorted files: ${movedCount}`);
         
         setLockUI(false);
         document.getElementById('btnPause').disabled = true;

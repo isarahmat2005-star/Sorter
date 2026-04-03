@@ -225,7 +225,6 @@
         }
     }
 
-    // Memilih Folder Sumber
     async function selectSourceFolder() {
         try {
             sourceDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
@@ -235,7 +234,6 @@
         } catch (e) { addLog("Source folder selection cancelled."); }
     }
 
-    // Memilih Folder Tujuan
     async function selectDestFolder() {
         try {
             destDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
@@ -245,7 +243,6 @@
         } catch (e) { addLog("Destination folder selection cancelled."); }
     }
 
-    // Fungsi Bantuan: Cek Resolusi Gambar (Px)
     function getImageDimensions(file) {
         return new Promise((resolve) => {
             const img = new Image();
@@ -256,7 +253,7 @@
         });
     }
 
-    // PROSES UTAMA: OPSI 1 (BATCH DELETE / TAMPUNG DULU HAPUS NANTI)
+    // PROSES UTAMA: OPSI 2 (TRIK AMNESIA - REQUEST REAL-TIME)
     async function startProcess() {
         const minMb = parseFloat(document.getElementById('minMb').value);
         const minPxStr = document.getElementById('minPx').value.trim().toLowerCase();
@@ -285,34 +282,43 @@
         addLog(`Criteria (OR): ${criteriaMsg.join(" | ")}`);
 
         let movedCount = 0;
-        let filesToDelete = []; // Buku catatan untuk file yang akan dihapus nanti
 
         try {
-            // ==========================================
-            // TAHAP 1: SCANNING DAN MENGKOPI FILE (TANPA MENGHAPUS)
-            // ==========================================
-            addLog("Scanning folder...");
+            // TAHAP 1: KUMPULKAN NAMA FILE SAJA (Tanpa menyentuh isi file)
+            addLog("Mendata daftar nama file...");
+            const fileNames = [];
             for await (const entry of sourceDirHandle.values()) {
+                if (entry.kind === 'file') {
+                    fileNames.push(entry.name);
+                }
+            }
+            addLog(`Mulai mengecek ${fileNames.length} file satu per satu...`);
+
+            // TAHAP 2: EKSEKUSI SATU PER SATU DENGAN DATA FRESH
+            for (let i = 0; i < fileNames.length; i++) {
                 if (isStopped) break;
                 while (isPaused) await new Promise(r => setTimeout(r, 500));
 
-                if (entry.kind === 'file') {
-                    const file = await entry.getFile();
+                const fileName = fileNames[i];
+                
+                try {
+                    // AMBIL HANDLE BARU SECARA REAL-TIME SEBELUM FILE DIPROSES
+                    const fileHandle = await sourceDirHandle.getFileHandle(fileName);
+                    const file = await fileHandle.getFile();
                     
                     let shouldMove = false;
                     let reason = "";
 
                     const sizeMB = file.size / (1024 * 1024);
-                    // Cara aman mengambil ekstensi
-                    const fileExt = file.name.includes('.') ? '.' + file.name.split('.').pop().toLowerCase() : '';
+                    const fileExt = fileName.includes('.') ? '.' + fileName.split('.').pop().toLowerCase() : '';
 
-                    // Kriteria 1: Ukuran MB
+                    // Cek Kriteria 1: MB
                     if (!isNaN(minMb) && minMb > 0 && sizeMB < minMb) {
                         shouldMove = true;
                         reason = `Size (${sizeMB.toFixed(2)} MB < ${minMb} MB)`;
                     }
 
-                    // Kriteria 2: Format
+                    // Cek Kriteria 2: Format
                     if (!shouldMove && formatExt !== "") {
                         if (fileExt !== formatExt) {
                             shouldMove = true;
@@ -320,9 +326,9 @@
                         }
                     }
 
-                    // Kriteria 3: Resolusi Px
+                    // Cek Kriteria 3: Px
                     if (!shouldMove && targetW > 0 && targetH > 0 && file.type.startsWith('image/')) {
-                        const dims = await getImageDimensions(file);
+                        const dims = await getImageDimensions(file); // Ini file fresh, aman dicek
                         if (dims.width > 0 && dims.height > 0) {
                             if (dims.width < targetW || dims.height < targetH) {
                                 shouldMove = true;
@@ -331,47 +337,31 @@
                         }
                     }
 
-                    // Eksekusi: Hanya Salin dan Catat Namanya
+                    // Eksekusi Pindah File Langsung
                     if (shouldMove) {
-                        try {
-                            const newFileHandle = await destDirHandle.getFileHandle(file.name, { create: true });
-                            const writable = await newFileHandle.createWritable();
-                            const fileData = await file.arrayBuffer();
-                            await writable.write(fileData);
-                            await writable.close();
+                        // Tarik arrayBuffer dari file yang 100% fresh
+                        const fileData = await file.arrayBuffer(); 
+                        
+                        // Buat file di tujuan
+                        const newFileHandle = await destDirHandle.getFileHandle(fileName, { create: true });
+                        const writable = await newFileHandle.createWritable();
+                        await writable.write(fileData);
+                        await writable.close();
 
-                            filesToDelete.push(file.name); // Simpan nama file di buku catatan
-                            movedCount++;
-                            addLog(`Copied: ${file.name} [${reason}]`);
-                        } catch (err) {
-                            addLog(`Error copying ${file.name}: ${err.message}`);
-                        }
-                    }
-                }
-            }
-
-            // ==========================================
-            // TAHAP 2: HAPUS MASSAL (BATCH DELETE)
-            // ==========================================
-            if (!isStopped && filesToDelete.length > 0) {
-                addLog("--- CLEANING UP SOURCE FOLDER ---");
-                // Kita beri jeda sedikit agar browser "bernapas" dan menutup iterator folder
-                await new Promise(r => setTimeout(r, 1000));
-                
-                for (let i = 0; i < filesToDelete.length; i++) {
-                    if (isStopped) break;
-                    const fileName = filesToDelete[i];
-                    try {
+                        // Langsung hajar hapus dari sumber
                         await sourceDirHandle.removeEntry(fileName);
-                        // addLog(`Deleted: ${fileName}`); // Buka komentar ini jika log ingin lebih cerewet
-                    } catch (err) {
-                        addLog(`Failed to delete ${fileName}: ${err.message}`);
+                        
+                        movedCount++;
+                        addLog(`=> Disortir: ${fileName} [${reason}]`);
                     }
+
+                } catch (err) {
+                    addLog(`Error memproses ${fileName}: ${err.message}`);
                 }
             }
 
         } catch (error) {
-            addLog(`System Error: ${error.message}`);
+            addLog(`Error sistem utama: ${error.message}`);
         }
 
         if (!isStopped) addLog(`--- PROCESS COMPLETE --- Total sorted files: ${movedCount}`);

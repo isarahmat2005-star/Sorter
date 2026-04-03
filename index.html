@@ -180,6 +180,7 @@
     </div>
 
 <script>
+    
     // --- PENGATURAN TEMA & JAM ---
     function toggleThemeMenu() { const m = document.getElementById('themeMenu'); m.style.display = m.style.display === 'flex' ? 'none' : 'flex'; }
     function setTheme(t) { document.body.className = t; document.getElementById('themeMenu').style.display = 'none'; localStorage.setItem('qcsorter_theme', t); addLog(`Theme set: ${t.toUpperCase()}`); }
@@ -196,26 +197,23 @@
         if (!document.querySelector('.nav-actions').contains(e.target)) document.getElementById('themeMenu').style.display = 'none';
     });
 
-    // --- LOGIKA UTAMA QC SORTER ---
+    // --- LOGIKA UTAMA QC SORTER (ALA ZIP - IN MEMORY) ---
     let sourceDirHandle = null;
     let destDirHandle = null;
     let isPaused = false;
     let isStopped = false;
     let isProcessing = false;
 
-    // Fungsi Log
     function addLog(m) { const p = document.getElementById('logPanel'); const t = new Date().toLocaleTimeString(); p.innerHTML += `<div class="log-entry"><span>[${t}]</span> ${m}</div>`; p.scrollTop = p.scrollHeight; }
     function clearLogs() { document.getElementById('logPanel').innerHTML = ''; }
     function copyLogs() { navigator.clipboard.writeText(Array.from(document.querySelectorAll('.log-entry')).map(e=>e.innerText).join('\n')).then(()=>alert("Logs copied!")); }
     function setLockUI(locked) { isProcessing = locked; document.querySelectorAll('.lock-target').forEach(el => el.disabled = locked); }
 
-    // Validasi Tombol Start
     function validateReady() {
         const btn = document.getElementById('btnStart');
         const minMb = document.getElementById('minMb').value;
         const minPx = document.getElementById('minPx').value;
         const formatExt = document.getElementById('formatExt').value;
-        
         const isCriteriaFilled = (minMb !== "") || (minPx !== "") || (formatExt !== "");
 
         if (sourceDirHandle && destDirHandle && isCriteriaFilled && !isProcessing) {
@@ -243,17 +241,25 @@
         } catch (e) { addLog("Destination folder selection cancelled."); }
     }
 
-    function getImageDimensions(file) {
+    // Fungsi Cek Px menggunakan Blob RAM
+    function getImageDimensionsFromBlob(blob) {
         return new Promise((resolve) => {
             const img = new Image();
-            const url = URL.createObjectURL(file);
-            img.onload = () => { URL.revokeObjectURL(url); resolve({ width: img.width, height: img.height }); };
-            img.onerror = () => { URL.revokeObjectURL(url); resolve({ width: 0, height: 0 }); };
+            const url = URL.createObjectURL(blob);
+            img.onload = () => {
+                const dims = { width: img.width, height: img.height };
+                URL.revokeObjectURL(url);
+                resolve(dims);
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+                resolve({ width: 0, height: 0 });
+            };
             img.src = url;
         });
     }
 
-    // PROSES UTAMA: OPSI 2 (TRIK AMNESIA - REQUEST REAL-TIME)
+    // PROSES UTAMA: LOGIKA ALA ZIP (SEDOT KE RAM DULU)
     async function startProcess() {
         const minMb = parseFloat(document.getElementById('minMb').value);
         const minPxStr = document.getElementById('minPx').value.trim().toLowerCase();
@@ -268,104 +274,86 @@
         if (formatExt !== "" && !formatExt.startsWith('.')) formatExt = '.' + formatExt;
 
         isStopped = false; isPaused = false;
-        
         setLockUI(true);
         document.getElementById('btnPause').disabled = false;
         document.getElementById('btnStop').disabled = false;
         document.getElementById('btnStart').disabled = true;
 
-        addLog("--- QC SCANNING STARTED ---");
-        let criteriaMsg = [];
-        if(!isNaN(minMb)) criteriaMsg.push(`Size < ${minMb} MB`);
-        if(targetW > 0) criteriaMsg.push(`Res < ${targetW}x${targetH} px`);
-        if(formatExt) criteriaMsg.push(`Format != ${formatExt}`);
-        addLog(`Criteria (OR): ${criteriaMsg.join(" | ")}`);
-
+        addLog("--- QC SCANNING STARTED (MEMORY MODE) ---");
+        
         let movedCount = 0;
 
         try {
-            // TAHAP 1: KUMPULKAN NAMA FILE SAJA (Tanpa menyentuh isi file)
-            addLog("Mendata daftar nama file...");
+            // TAHAP 1: ABSEN NAMA FILE
             const fileNames = [];
             for await (const entry of sourceDirHandle.values()) {
-                if (entry.kind === 'file') {
-                    fileNames.push(entry.name);
-                }
+                if (entry.kind === 'file') fileNames.push(entry.name);
             }
-            addLog(`Mulai mengecek ${fileNames.length} file satu per satu...`);
 
-            // TAHAP 2: EKSEKUSI SATU PER SATU DENGAN DATA FRESH
-            for (let i = 0; i < fileNames.length; i++) {
+            for (const fileName of fileNames) {
                 if (isStopped) break;
                 while (isPaused) await new Promise(r => setTimeout(r, 500));
 
-                const fileName = fileNames[i];
-                
                 try {
-                    // AMBIL HANDLE BARU SECARA REAL-TIME SEBELUM FILE DIPROSES
+                    // TAHAP 2: SEDOT KILAT KE RAM (ArrayBuffer)
+                    // Begitu baris ini selesai, hubungan fisik file sudah putus!
                     const fileHandle = await sourceDirHandle.getFileHandle(fileName);
-                    const file = await fileHandle.getFile();
-                    
+                    const fileFile = await fileHandle.getFile();
+                    const fileBuffer = await fileFile.arrayBuffer();
+                    const fileBlob = new Blob([fileBuffer], { type: fileFile.type });
+
                     let shouldMove = false;
                     let reason = "";
 
-                    const sizeMB = file.size / (1024 * 1024);
-                    const fileExt = fileName.includes('.') ? '.' + fileName.split('.').pop().toLowerCase() : '';
+                    const sizeMB = fileBlob.size / (1024 * 1024);
+                    const currentExt = fileName.includes('.') ? '.' + fileName.split('.').pop().toLowerCase() : '';
 
-                    // Cek Kriteria 1: MB
+                    // Kriteria 1: MB
                     if (!isNaN(minMb) && minMb > 0 && sizeMB < minMb) {
                         shouldMove = true;
-                        reason = `Size (${sizeMB.toFixed(2)} MB < ${minMb} MB)`;
+                        reason = `Size ${sizeMB.toFixed(2)}MB`;
                     }
 
-                    // Cek Kriteria 2: Format
-                    if (!shouldMove && formatExt !== "") {
-                        if (fileExt !== formatExt) {
+                    // Kriteria 2: Format
+                    if (!shouldMove && formatExt !== "" && currentExt !== formatExt) {
+                        shouldMove = true;
+                        reason = `Format ${currentExt}`;
+                    }
+
+                    // Kriteria 3: Resolusi (Menggunakan Blob di RAM)
+                    if (!shouldMove && targetW > 0 && targetH > 0 && fileFile.type.startsWith('image/')) {
+                        const dims = await getImageDimensionsFromBlob(fileBlob);
+                        if (dims.width > 0 && (dims.width < targetW || dims.height < targetH)) {
                             shouldMove = true;
-                            reason = `Format (${fileExt} != ${formatExt})`;
+                            reason = `Res ${dims.width}x${dims.height}`;
                         }
                     }
 
-                    // Cek Kriteria 3: Px
-                    if (!shouldMove && targetW > 0 && targetH > 0 && file.type.startsWith('image/')) {
-                        const dims = await getImageDimensions(file); // Ini file fresh, aman dicek
-                        if (dims.width > 0 && dims.height > 0) {
-                            if (dims.width < targetW || dims.height < targetH) {
-                                shouldMove = true;
-                                reason = `Res (${dims.width}x${dims.height} < ${targetW}x${targetH})`;
-                            }
-                        }
-                    }
-
-                    // Eksekusi Pindah File Langsung
+                    // TAHAP 3: EKSEKUSI DARI RAM
                     if (shouldMove) {
-                        // Tarik arrayBuffer dari file yang 100% fresh
-                        const fileData = await file.arrayBuffer(); 
-                        
-                        // Buat file di tujuan
+                        // Tulis ke Tujuan (Data diambil dari fileBuffer di RAM)
                         const newFileHandle = await destDirHandle.getFileHandle(fileName, { create: true });
                         const writable = await newFileHandle.createWritable();
-                        await writable.write(fileData);
+                        await writable.write(fileBuffer);
                         await writable.close();
 
-                        // Langsung hajar hapus dari sumber
+                        // Hapus dari Sumber (Aman karena data sudah aman di RAM dan folder tujuan)
                         await sourceDirHandle.removeEntry(fileName);
                         
                         movedCount++;
-                        addLog(`=> Disortir: ${fileName} [${reason}]`);
+                        addLog(`=> Sorted: ${fileName} [${reason}]`);
                     }
 
                 } catch (err) {
-                    addLog(`Error memproses ${fileName}: ${err.message}`);
+                    addLog(`Skip ${fileName}: ${err.message}`);
                 }
             }
 
         } catch (error) {
-            addLog(`Error sistem utama: ${error.message}`);
+            addLog(`System Error: ${error.message}`);
         }
 
-        if (!isStopped) addLog(`--- PROCESS COMPLETE --- Total sorted files: ${movedCount}`);
-        
+        addLog(`--- SELESAI --- Total sorted: ${movedCount} file.`);
         setLockUI(false);
         document.getElementById('btnPause').disabled = true;
         document.getElementById('btnStop').disabled = true;
@@ -380,7 +368,7 @@
 
     function stopProcess() {
         isStopped = true;
-        addLog("System STOPPED by User");
+        addLog("System STOPPED");
         setLockUI(false);
         document.getElementById('btnPause').disabled = true;
         document.getElementById('btnStop').disabled = true;

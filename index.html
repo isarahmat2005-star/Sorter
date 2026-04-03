@@ -193,16 +193,11 @@
     }
     setInterval(updateClock, 1000); updateClock();
 
-    document.addEventListener('click', e => {
-        if (!document.querySelector('.nav-actions').contains(e.target)) document.getElementById('themeMenu').style.display = 'none';
-    });
-
-    // --- LOGIKA UTAMA QC SORTER (ALA ZIP - IN MEMORY) ---
+    // --- LOGIKA UTAMA QC SORTER (STABLE VERSION) ---
+    let sourceFiles = []; // Ini rahasianya: menyimpan daftar file murni ala ZIP
     let sourceDirHandle = null;
     let destDirHandle = null;
-    let isPaused = false;
-    let isStopped = false;
-    let isProcessing = false;
+    let isPaused = false, isStopped = false, isProcessing = false;
 
     function addLog(m) { const p = document.getElementById('logPanel'); const t = new Date().toLocaleTimeString(); p.innerHTML += `<div class="log-entry"><span>[${t}]</span> ${m}</div>`; p.scrollTop = p.scrollHeight; }
     function clearLogs() { document.getElementById('logPanel').innerHTML = ''; }
@@ -211,169 +206,130 @@
 
     function validateReady() {
         const btn = document.getElementById('btnStart');
-        const minMb = document.getElementById('minMb').value;
-        const minPx = document.getElementById('minPx').value;
-        const formatExt = document.getElementById('formatExt').value;
-        const isCriteriaFilled = (minMb !== "") || (minPx !== "") || (formatExt !== "");
-
-        if (sourceDirHandle && destDirHandle && isCriteriaFilled && !isProcessing) {
-            btn.disabled = false;
-        } else {
-            btn.disabled = true;
-        }
+        const m = document.getElementById('minMb').value;
+        const p = document.getElementById('minPx').value;
+        const f = document.getElementById('formatExt').value;
+        const criteriaOk = (m !== "") || (p !== "") || (f !== "");
+        btn.disabled = !(sourceDirHandle && destDirHandle && criteriaOk && !isProcessing);
     }
 
+    // PILIH FOLDER SUMBER (ALA REFORNAM - STABLE)
     async function selectSourceFolder() {
         try {
             sourceDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
             document.getElementById('sourcePath').innerText = sourceDirHandle.name;
-            addLog(`Source Folder Linked: ${sourceDirHandle.name}`);
+            
+            // SEDOT DAFTAR FILE KE MEMORI SEKARANG JUGA (ALA ZIP)
+            sourceFiles = [];
+            for await (const entry of sourceDirHandle.values()) {
+                if (entry.kind === 'file') {
+                    const file = await entry.getFile();
+                    sourceFiles.push({ name: entry.name, data: file });
+                }
+            }
+            addLog(`Folder Sumber Terhubung: ${sourceFiles.length} file siap di-scan.`);
             validateReady();
-        } catch (e) { addLog("Source folder selection cancelled."); }
+        } catch (e) { addLog("Akses folder sumber dibatalkan."); }
     }
 
     async function selectDestFolder() {
         try {
             destDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
             document.getElementById('destPath').innerText = destDirHandle.name;
-            addLog(`Destination Folder Linked: ${destDirHandle.name}`);
+            addLog(`Folder Tujuan Terhubung: ${destDirHandle.name}`);
             validateReady();
-        } catch (e) { addLog("Destination folder selection cancelled."); }
+        } catch (e) { addLog("Akses folder tujuan dibatalkan."); }
     }
 
-    // Fungsi Cek Px menggunakan Blob RAM
-    function getImageDimensionsFromBlob(blob) {
+    function getImgDim(file) {
         return new Promise((resolve) => {
             const img = new Image();
-            const url = URL.createObjectURL(blob);
-            img.onload = () => {
-                const dims = { width: img.width, height: img.height };
-                URL.revokeObjectURL(url);
-                resolve(dims);
-            };
-            img.onerror = () => {
-                URL.revokeObjectURL(url);
-                resolve({ width: 0, height: 0 });
-            };
+            const url = URL.createObjectURL(file);
+            img.onload = () => { URL.revokeObjectURL(url); resolve({ w: img.width, h: img.height }); };
+            img.onerror = () => { URL.revokeObjectURL(url); resolve({ w: 0, h: 0 }); };
             img.src = url;
         });
     }
 
-    // PROSES UTAMA: LOGIKA ALA ZIP (SEDOT KE RAM DULU)
+    // PROSES UTAMA (STABLE LOGIC)
     async function startProcess() {
-        const minMb = parseFloat(document.getElementById('minMb').value);
-        const minPxStr = document.getElementById('minPx').value.trim().toLowerCase();
-        let targetW = 0, targetH = 0;
-        if (minPxStr.includes('x')) {
-            const parts = minPxStr.split('x');
-            targetW = parseInt(parts[0]);
-            targetH = parseInt(parts[1]);
-        }
+        const minMb = parseFloat(document.getElementById('minMb').value) || 0;
+        const minPx = document.getElementById('minPx').value.trim().toLowerCase();
+        let tw = 0, th = 0;
+        if(minPx.includes('x')) [tw, th] = minPx.split('x').map(n => parseInt(n));
         
-        let formatExt = document.getElementById('formatExt').value.trim().toLowerCase();
-        if (formatExt !== "" && !formatExt.startsWith('.')) formatExt = '.' + formatExt;
+        let targetExt = document.getElementById('formatExt').value.trim().toLowerCase();
+        if (targetExt && !targetExt.startsWith('.')) targetExt = '.' + targetExt;
 
         isStopped = false; isPaused = false;
         setLockUI(true);
         document.getElementById('btnPause').disabled = false;
         document.getElementById('btnStop').disabled = false;
-        document.getElementById('btnStart').disabled = true;
 
-        addLog("--- QC SCANNING STARTED (MEMORY MODE) ---");
-        
+        addLog("--- MEMULAI PENYORTIRAN ---");
         let movedCount = 0;
 
-        try {
-            // TAHAP 1: ABSEN NAMA FILE
-            const fileNames = [];
-            for await (const entry of sourceDirHandle.values()) {
-                if (entry.kind === 'file') fileNames.push(entry.name);
-            }
+        for (const item of sourceFiles) {
+            if (isStopped) break;
+            while (isPaused) await new Promise(r => setTimeout(r, 500));
 
-            for (const fileName of fileNames) {
-                if (isStopped) break;
-                while (isPaused) await new Promise(r => setTimeout(r, 500));
+            const file = item.data;
+            const fileName = item.name;
+            let shouldMove = false;
+            let reason = "";
 
-                try {
-                    // TAHAP 2: SEDOT KILAT KE RAM (ArrayBuffer)
-                    // Begitu baris ini selesai, hubungan fisik file sudah putus!
-                    const fileHandle = await sourceDirHandle.getFileHandle(fileName);
-                    const fileFile = await fileHandle.getFile();
-                    const fileBuffer = await fileFile.arrayBuffer();
-                    const fileBlob = new Blob([fileBuffer], { type: fileFile.type });
-
-                    let shouldMove = false;
-                    let reason = "";
-
-                    const sizeMB = fileBlob.size / (1024 * 1024);
-                    const currentExt = fileName.includes('.') ? '.' + fileName.split('.').pop().toLowerCase() : '';
-
-                    // Kriteria 1: MB
-                    if (!isNaN(minMb) && minMb > 0 && sizeMB < minMb) {
-                        shouldMove = true;
-                        reason = `Size ${sizeMB.toFixed(2)}MB`;
-                    }
-
-                    // Kriteria 2: Format
-                    if (!shouldMove && formatExt !== "" && currentExt !== formatExt) {
-                        shouldMove = true;
-                        reason = `Format ${currentExt}`;
-                    }
-
-                    // Kriteria 3: Resolusi (Menggunakan Blob di RAM)
-                    if (!shouldMove && targetW > 0 && targetH > 0 && fileFile.type.startsWith('image/')) {
-                        const dims = await getImageDimensionsFromBlob(fileBlob);
-                        if (dims.width > 0 && (dims.width < targetW || dims.height < targetH)) {
-                            shouldMove = true;
-                            reason = `Res ${dims.width}x${dims.height}`;
-                        }
-                    }
-
-                    // TAHAP 3: EKSEKUSI DARI RAM
-                    if (shouldMove) {
-                        // Tulis ke Tujuan (Data diambil dari fileBuffer di RAM)
-                        const newFileHandle = await destDirHandle.getFileHandle(fileName, { create: true });
-                        const writable = await newFileHandle.createWritable();
-                        await writable.write(fileBuffer);
-                        await writable.close();
-
-                        // Hapus dari Sumber (Aman karena data sudah aman di RAM dan folder tujuan)
-                        await sourceDirHandle.removeEntry(fileName);
-                        
-                        movedCount++;
-                        addLog(`=> Sorted: ${fileName} [${reason}]`);
-                    }
-
-                } catch (err) {
-                    addLog(`Skip ${fileName}: ${err.message}`);
+            try {
+                // 1. CEK UKURAN
+                const sizeMB = file.size / (1024 * 1024);
+                if (minMb > 0 && sizeMB < minMb) {
+                    shouldMove = true; reason = `Size < ${minMb}MB`;
                 }
-            }
 
-        } catch (error) {
-            addLog(`System Error: ${error.message}`);
+                // 2. CEK FORMAT
+                const fileExt = fileName.includes('.') ? '.' + fileName.split('.').pop().toLowerCase() : '';
+                if (!shouldMove && targetExt && fileExt !== targetExt) {
+                    shouldMove = true; reason = `Bukan ${targetExt}`;
+                }
+
+                // 3. CEK RESOLUSI
+                if (!shouldMove && tw > 0 && file.type.startsWith('image/')) {
+                    const d = await getImgDim(file);
+                    if (d.w > 0 && (d.w < tw || d.h < th)) {
+                        shouldMove = true; reason = `Res ${d.w}x${d.h}`;
+                    }
+                }
+
+                // EKSEKUSI PEMINDAHAN (STABLE STREAM)
+                if (shouldMove) {
+                    // Tulis ke Tujuan
+                    const newHandle = await destDirHandle.getFileHandle(fileName, { create: true });
+                    const writable = await newHandle.createWritable();
+                    await writable.write(file); // Tulis objek file murni
+                    await writable.close();
+
+                    // Hapus dari Sumber
+                    await sourceDirHandle.removeEntry(fileName);
+                    
+                    movedCount++;
+                    addLog(`[OK] Pindah: ${fileName} (${reason})`);
+                }
+            } catch (err) {
+                addLog(`[FAIL] ${fileName}: ${err.message}`);
+            }
         }
 
-        addLog(`--- SELESAI --- Total sorted: ${movedCount} file.`);
+        addLog(`--- SELESAI --- Total: ${movedCount} file dipindah.`);
         setLockUI(false);
         document.getElementById('btnPause').disabled = true;
         document.getElementById('btnStop').disabled = true;
         validateReady();
     }
 
-    function pauseProcess() {
-        isPaused = !isPaused;
-        document.getElementById('btnPause').innerText = isPaused ? "RESUME" : "PAUSE";
-        addLog(isPaused ? "System PAUSED" : "System RESUMED");
-    }
-
-    function stopProcess() {
-        isStopped = true;
-        addLog("System STOPPED");
-        setLockUI(false);
-        document.getElementById('btnPause').disabled = true;
-        document.getElementById('btnStop').disabled = true;
-        validateReady();
-    }
+    function pauseProcess() { isPaused = !isPaused; document.getElementById('btnPause').innerText = isPaused ? "RESUME" : "PAUSE"; }
+    function stopProcess() { isStopped = true; addLog("Proses dihentikan paksa."); setLockUI(false); }
+    
+    document.addEventListener('click', e => { if (!document.querySelector('.nav-actions').contains(e.target)) document.getElementById('themeMenu').style.display = 'none'; });
+</script>
 </script>
 </body>
 </html>

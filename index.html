@@ -193,7 +193,7 @@
     }
     setInterval(updateClock, 1000); updateClock();
 
-    // --- LOGIKA UTAMA QC SORTER (STABLE VERSION) ---
+    // --- LOGIKA UTAMA QC SORTER (TWO-STAGE STRATEGY) ---
     let sourceDirHandle = null;
     let destDirHandle = null;
     let isPaused = false, isStopped = false, isProcessing = false;
@@ -205,10 +205,9 @@
 
     function validateReady() {
         const btn = document.getElementById('btnStart');
-        const m = document.getElementById('minMb').value;
-        const p = document.getElementById('minPx').value;
-        const f = document.getElementById('formatExt').value;
-        const criteriaOk = (m !== "") || (p !== "") || (f !== "");
+        const criteriaOk = (document.getElementById('minMb').value !== "") || 
+                           (document.getElementById('minPx').value !== "") || 
+                           (document.getElementById('formatExt').value !== "");
         btn.disabled = !(sourceDirHandle && destDirHandle && criteriaOk && !isProcessing);
     }
 
@@ -216,18 +215,18 @@
         try {
             sourceDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
             document.getElementById('sourcePath').innerText = sourceDirHandle.name;
-            addLog(`Folder Sumber Terhubung: ${sourceDirHandle.name}`);
+            addLog(`Sumber Terhubung: ${sourceDirHandle.name}`);
             validateReady();
-        } catch (e) { addLog("Akses folder sumber dibatalkan."); }
+        } catch (e) { addLog("Akses dibatalkan."); }
     }
 
     async function selectDestFolder() {
         try {
             destDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
             document.getElementById('destPath').innerText = destDirHandle.name;
-            addLog(`Folder Tujuan Terhubung: ${destDirHandle.name}`);
+            addLog(`Tujuan Terhubung: ${destDirHandle.name}`);
             validateReady();
-        } catch (e) { addLog("Akses folder tujuan dibatalkan."); }
+        } catch (e) { addLog("Akses dibatalkan."); }
     }
 
     function getImgDim(file) {
@@ -240,7 +239,7 @@
         });
     }
 
-    // PROSES UTAMA (REVISED STABLE LOGIC)
+    // PROSES UTAMA (TWO-STAGE STRATEGY)
     async function startProcess() {
         const minMb = parseFloat(document.getElementById('minMb').value) || 0;
         const minPx = document.getElementById('minPx').value.trim().toLowerCase();
@@ -254,72 +253,74 @@
         document.getElementById('btnPause').disabled = false;
         document.getElementById('btnStop').disabled = false;
 
-        addLog("--- MEMULAI PENYORTIRAN ---");
-        let movedCount = 0;
+        let blackList = []; // Daftar file yang akan dibuang
 
         try {
-            // STEP 1: Ambil daftar entri folder secepat mungkin
-            const entries = [];
+            // TAHAP 1: SCANNING (MENGUMPULKAN DAFTAR HITAM)
+            addLog("--- TAHAP 1: SCANNING KRITERIA ---");
             for await (const entry of sourceDirHandle.values()) {
-                if (entry.kind === 'file') entries.push(entry);
-            }
-
-            // STEP 2: Olah file satu per satu
-            for (const entry of entries) {
                 if (isStopped) break;
-                while (isPaused) await new Promise(r => setTimeout(r, 500));
+                if (entry.kind !== 'file') continue;
 
-                try {
-                    const file = await entry.getFile();
-                    const fileName = entry.name;
-                    let shouldMove = false;
-                    let reason = "";
+                const file = await entry.getFile();
+                let bad = false;
+                let reason = "";
 
-                    // Cek Ukuran
-                    const sizeMB = file.size / (1024 * 1024);
-                    if (minMb > 0 && sizeMB < minMb) {
-                        shouldMove = true; reason = `${sizeMB.toFixed(2)}MB < ${minMb}MB`;
-                    }
+                // Cek MB
+                const sizeMB = file.size / (1024 * 1024);
+                if (minMb > 0 && sizeMB < minMb) { bad = true; reason = `Size ${sizeMB.toFixed(2)}MB`; }
 
-                    // Cek Format
-                    const fileExt = fileName.includes('.') ? '.' + fileName.split('.').pop().toLowerCase() : '';
-                    if (!shouldMove && targetExt && fileExt !== targetExt) {
-                        shouldMove = true; reason = `Format ${fileExt}`;
-                    }
+                // Cek Format
+                const fileExt = entry.name.includes('.') ? '.' + entry.name.split('.').pop().toLowerCase() : '';
+                if (!bad && targetExt && fileExt !== targetExt) { bad = true; reason = `Format ${fileExt}`; }
 
-                    // Cek Resolusi
-                    if (!shouldMove && tw > 0 && file.type.startsWith('image/')) {
-                        const d = await getImgDim(file);
-                        if (d.w > 0 && (d.w < tw || d.h < th)) {
-                            shouldMove = true; reason = `Res ${d.w}x${d.h}`;
-                        }
-                    }
+                // Cek Resolusi (Hanya jika belum kena kriteria lain)
+                if (!bad && tw > 0 && file.type.startsWith('image/')) {
+                    const d = await getImgDim(file);
+                    if (d.w > 0 && (d.w < tw || d.h < th)) { bad = true; reason = `Res ${d.w}x${d.h}`; }
+                }
 
-                    if (shouldMove) {
-                        // TULIS DATA (Logika Blob agar tidak cacat)
-                        const newHandle = await destDirHandle.getFileHandle(fileName, { create: true });
-                        const writable = await newHandle.createWritable();
-                        
-                        // Menulis data murni
-                        await writable.write(await file.arrayBuffer());
-                        await writable.close();
-
-                        // HAPUS ASLI
-                        await sourceDirHandle.removeEntry(fileName);
-                        
-                        movedCount++;
-                        addLog(`[OK] Pindah: ${fileName} (${reason})`);
-                    }
-                } catch (e) {
-                    if (e.name === 'NotFoundError') continue; // File sudah hilang/diproses
-                    addLog(`[SKIP] ${entry.name}: ${e.message}`);
+                if (bad) {
+                    blackList.push({ name: entry.name, reason: reason });
+                    addLog(`[Marked] ${entry.name} (${reason})`);
                 }
             }
+
+            // Jeda 1 detik agar browser melepaskan memori Image render
+            addLog(`Scan Selesai. ${blackList.length} file masuk daftar sortir.`);
+            await new Promise(r => setTimeout(r, 1000));
+
+            // TAHAP 2: EKSEKUSI PEMINDAHAN (MURNI SALIN & HAPUS)
+            if (!isStopped && blackList.length > 0) {
+                addLog("--- TAHAP 2: EKSEKUSI PEMINDAHAN ---");
+                for (const item of blackList) {
+                    if (isStopped) break;
+                    while (isPaused) await new Promise(r => setTimeout(r, 500));
+
+                    try {
+                        const fileEntry = await sourceDirHandle.getFileHandle(item.name);
+                        const fileData = await fileEntry.getFile();
+                        
+                        // Salin secepat kilat (Stream)
+                        const newHandle = await destDirHandle.getFileHandle(item.name, { create: true });
+                        const writable = await newHandle.createWritable();
+                        await writable.write(await fileData.arrayBuffer());
+                        await writable.close();
+
+                        // Hapus asli
+                        await sourceDirHandle.removeEntry(item.name);
+                        addLog(`[SUCCESS] Dipindahkan: ${item.name}`);
+                    } catch (e) {
+                        addLog(`[FAILED] Gagal pindah ${item.name}: ${e.message}`);
+                    }
+                }
+            }
+
         } catch (err) {
             addLog(`[ERROR SYSTEM]: ${err.message}`);
         }
 
-        addLog(`--- SELESAI --- Total: ${movedCount} file.`);
+        addLog(`--- PROSES SELESAI ---`);
         setLockUI(false);
         document.getElementById('btnPause').disabled = true;
         document.getElementById('btnStop').disabled = true;
@@ -329,7 +330,6 @@
     function pauseProcess() { isPaused = !isPaused; document.getElementById('btnPause').innerText = isPaused ? "RESUME" : "PAUSE"; }
     function stopProcess() { isStopped = true; addLog("Proses dihentikan."); setLockUI(false); }
     document.addEventListener('click', e => { if (!document.querySelector('.nav-actions').contains(e.target)) document.getElementById('themeMenu').style.display = 'none'; });
-
 </script>
 </body>
 </html>

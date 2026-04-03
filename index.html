@@ -193,7 +193,7 @@
     }
     setInterval(updateClock, 1000); updateClock();
 
-    // --- LOGIKA UTAMA QC SORTER (TWO-STAGE STRATEGY) ---
+    // --- LOGIKA UTAMA QC SORTER (BASE64 CLONING STRATEGY) ---
     let sourceDirHandle = null;
     let destDirHandle = null;
     let isPaused = false, isStopped = false, isProcessing = false;
@@ -229,17 +229,27 @@
         } catch (e) { addLog("Akses dibatalkan."); }
     }
 
-    function getImgDim(file) {
-        return new Promise((resolve) => {
-            const img = new Image();
-            const url = URL.createObjectURL(file);
-            img.onload = () => { const d = {w: img.width, h: img.height}; URL.revokeObjectURL(url); resolve(d); };
-            img.onerror = () => { URL.revokeObjectURL(url); resolve({w:0, h:0}); };
-            img.src = url;
+    // 1. FUNGSI UBAH FILE JADI TEKS (BASE64)
+    function fileToDataURL(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(new Error("Gagal membaca DNA file"));
+            reader.readAsDataURL(file); // Disini file disedot 100% jadi Teks
         });
     }
 
-    // PROSES UTAMA (TWO-STAGE STRATEGY)
+    // 2. FUNGSI CEK RESOLUSI DARI TEKS
+    function getImgDimFromDataURL(dataURL) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve({ w: img.width, h: img.height });
+            img.onerror = () => resolve({ w: 0, h: 0 });
+            img.src = dataURL; // Render dari Teks Base64, bukan dari Harddisk!
+        });
+    }
+
+    // PROSES UTAMA
     async function startProcess() {
         const minMb = parseFloat(document.getElementById('minMb').value) || 0;
         const minPx = document.getElementById('minPx').value.trim().toLowerCase();
@@ -253,74 +263,87 @@
         document.getElementById('btnPause').disabled = false;
         document.getElementById('btnStop').disabled = false;
 
-        let blackList = []; // Daftar file yang akan dibuang
+        addLog("--- MEMULAI PENYORTIRAN (CLONING MODE) ---");
+        let movedCount = 0;
 
         try {
-            // TAHAP 1: SCANNING (MENGUMPULKAN DAFTAR HITAM)
-            addLog("--- TAHAP 1: SCANNING KRITERIA ---");
+            // Ambil daftar file
+            const entries = [];
             for await (const entry of sourceDirHandle.values()) {
-                if (isStopped) break;
-                if (entry.kind !== 'file') continue;
-
-                const file = await entry.getFile();
-                let bad = false;
-                let reason = "";
-
-                // Cek MB
-                const sizeMB = file.size / (1024 * 1024);
-                if (minMb > 0 && sizeMB < minMb) { bad = true; reason = `Size ${sizeMB.toFixed(2)}MB`; }
-
-                // Cek Format
-                const fileExt = entry.name.includes('.') ? '.' + entry.name.split('.').pop().toLowerCase() : '';
-                if (!bad && targetExt && fileExt !== targetExt) { bad = true; reason = `Format ${fileExt}`; }
-
-                // Cek Resolusi (Hanya jika belum kena kriteria lain)
-                if (!bad && tw > 0 && file.type.startsWith('image/')) {
-                    const d = await getImgDim(file);
-                    if (d.w > 0 && (d.w < tw || d.h < th)) { bad = true; reason = `Res ${d.w}x${d.h}`; }
-                }
-
-                if (bad) {
-                    blackList.push({ name: entry.name, reason: reason });
-                    addLog(`[Marked] ${entry.name} (${reason})`);
-                }
+                if (entry.kind === 'file') entries.push(entry);
             }
 
-            // Jeda 1 detik agar browser melepaskan memori Image render
-            addLog(`Scan Selesai. ${blackList.length} file masuk daftar sortir.`);
-            await new Promise(r => setTimeout(r, 1000));
+            for (const entry of entries) {
+                if (isStopped) break;
+                while (isPaused) await new Promise(r => setTimeout(r, 500));
 
-            // TAHAP 2: EKSEKUSI PEMINDAHAN (MURNI SALIN & HAPUS)
-            if (!isStopped && blackList.length > 0) {
-                addLog("--- TAHAP 2: EKSEKUSI PEMINDAHAN ---");
-                for (const item of blackList) {
-                    if (isStopped) break;
-                    while (isPaused) await new Promise(r => setTimeout(r, 500));
+                try {
+                    const file = await entry.getFile();
+                    const fileName = entry.name;
+                    let shouldMove = false;
+                    let reason = "";
+                    let base64Data = null; // Penampung Teks DNA
 
-                    try {
-                        const fileEntry = await sourceDirHandle.getFileHandle(item.name);
-                        const fileData = await fileEntry.getFile();
+                    // 1. Cek MB (KTP)
+                    const sizeMB = file.size / (1024 * 1024);
+                    if (minMb > 0 && sizeMB < minMb) {
+                        shouldMove = true; reason = `${sizeMB.toFixed(2)}MB < ${minMb}MB`;
+                    }
+
+                    // 2. Cek Format (KTP)
+                    const fileExt = fileName.includes('.') ? '.' + fileName.split('.').pop().toLowerCase() : '';
+                    if (!shouldMove && targetExt && fileExt !== targetExt) {
+                        shouldMove = true; reason = `Format ${fileExt}`;
+                    }
+
+                    // 3. Cek Resolusi (Tes Darah -> Pakai Teks Base64)
+                    if (!shouldMove && tw > 0 && file.type.startsWith('image/')) {
+                        // Ubah file jadi teks sandi (memutuskan hubungan dengan harddisk)
+                        base64Data = await fileToDataURL(file); 
                         
-                        // Salin secepat kilat (Stream)
-                        const newHandle = await destDirHandle.getFileHandle(item.name, { create: true });
+                        // Cek resolusi dari teks tersebut
+                        const d = await getImgDimFromDataURL(base64Data);
+                        if (d.w > 0 && (d.w < tw || d.h < th)) {
+                            shouldMove = true; reason = `Res ${d.w}x${d.h}`;
+                        }
+                    }
+
+                    // 4. EKSEKUSI (Penciptaan File Baru)
+                    if (shouldMove) {
+                        const newHandle = await destDirHandle.getFileHandle(fileName, { create: true });
                         const writable = await newHandle.createWritable();
-                        await writable.write(await fileData.arrayBuffer());
+
+                        if (base64Data) {
+                            // Jika tadi file diubah jadi Teks (karena cek Resolusi)
+                            // Ubah kembali Teks itu jadi Binary utuh, lalu tulis!
+                            const response = await fetch(base64Data);
+                            const buffer = await response.arrayBuffer();
+                            await writable.write(buffer);
+                        } else {
+                            // Jika kena kriteria MB/Format (belum jadi teks)
+                            // Tulis langsung pakai buffer biasa
+                            await writable.write(await file.arrayBuffer());
+                        }
+                        
                         await writable.close();
 
-                        // Hapus asli
-                        await sourceDirHandle.removeEntry(item.name);
-                        addLog(`[SUCCESS] Dipindahkan: ${item.name}`);
-                    } catch (e) {
-                        addLog(`[FAILED] Gagal pindah ${item.name}: ${e.message}`);
+                        // Hapus file asli dengan santai
+                        await sourceDirHandle.removeEntry(fileName);
+                        
+                        movedCount++;
+                        addLog(`[OK] Pindah: ${fileName} (${reason})`);
+                    }
+                } catch (e) {
+                    if (e.name !== 'NotFoundError') {
+                        addLog(`[ERROR] ${entry.name}: ${e.message}`);
                     }
                 }
             }
-
         } catch (err) {
-            addLog(`[ERROR SYSTEM]: ${err.message}`);
+            addLog(`[SISTEM ERROR]: ${err.message}`);
         }
 
-        addLog(`--- PROSES SELESAI ---`);
+        addLog(`--- SELESAI --- Total: ${movedCount} file.`);
         setLockUI(false);
         document.getElementById('btnPause').disabled = true;
         document.getElementById('btnStop').disabled = true;
